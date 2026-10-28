@@ -39,7 +39,11 @@ Hitters <- na.omit(Hitters)
 x <- model.matrix(Salary~ ., Hitters)[, -1]
 
 y <- Hitters$Salary
+```
 
+# first try
+
+```{r}
 set.seed(333)
 train <- sample(c(TRUE, FALSE), nrow(Hitters),
 replace = TRUE)
@@ -167,5 +171,158 @@ lm(y ~ x, subset = train)
 predict(ridge.mod, s = 0, exact = T, type = "coefficients", x = x[train, ], y = y[train])[1:20, ]
 
 
+```
+
+
+
+# second try
+
+Use the cv. for cross validation to make it shorter.
+
+```{r}
+# initialise the situation again in case something was done wrong in the first try
+set.seed(333)
+
+Hitters <- na.omit(Hitters)
+
+x <- model.matrix(Salary~ ., Hitters)[, -1]
+y <- Hitters$Salary
+
+# make grid and train + test sets again
+grid <- 10^seq(10, -2, length = 100)
+train <- sample(1:nrow(x), nrow(x) / 2)
+test <- (-train)
+y.test <- y[test]
+
+# fit the lasso on the training data using the grid
+lasso.mod <- glmnet(x[train, ], y[train], alpha = 1, lambda = grid)
+
+# cross validate to find best lambda
+cv.out.lasso <- cv.glmnet(x[train, ], y[train], alpha = 1)
+bestlam.lasso <- cv.out.lasso$lambda.min
+
+# now check the performance 
+lasso.pred <- predict(lasso.mod, s = bestlam.lasso, newx = x[test, ])
+lasso.mse <- mean((lasso.pred - y.test)^2)
+print(paste("Lasso Test MSE:", lasso.mse))
+
+# refit on the actual sample to find the zero and non zero coefficients
+out.lasso <- glmnet(x, y, alpha = 1, lambda = grid)
+lasso.coef <- predict(out.lasso, type = "coefficients", s = bestlam.lasso)[1:20, ]
+lasso.coef
+
+```
+Now we want to look how the ridge, elastic net, and adaptive lasso compare to this.
+To see this we have to perform the same things on those aapproaches.
+
+```{r}
+# for ridge need alpha = 0
+ridge.mod <- glmnet(x[train, ], y[train], alpha = 0, lambda = grid)
+
+# cross validate and estimate best lambda
+cv.out.ridge <- cv.glmnet(x[train, ], y[train], alpha = 0)
+bestlam.ridge <- cv.out.ridge$lambda.min
+
+# predict on the test set and see how it performs
+ridge.pred <- predict(ridge.mod, s = bestlam.ridge, newx = x[test, ])
+ridge.mse <- mean((ridge.pred - y.test)^2)
+print(paste("Ridge Test MSE:", ridge.mse))
+
+```
+
+Now do the elastic net.
+
+```{r}
+# for the elastic net set alpha = 0.5
+elastic.mod <- glmnet(x[train, ], y[train], alpha = 0.5, lambda = grid)
+
+# cross validate on training set and find best lambda
+cv.out.elastic <- cv.glmnet(x[train, ], y[train], alpha = 0.5)
+bestlam.elastic <- cv.out.elastic$lambda.min
+
+# check how it performs versus testing set
+elastic.pred <- predict(elastic.mod, s = bestlam.elastic, newx = x[test, ])
+elastic.mse <- mean((elastic.pred - y.test)^2)
+print(paste("Elastic Net Test MSE:", elastic.mse))
+
+```
+ 
+Finally, check adaptive lasso. Need to do an initial estimation to find coefficients for the weights. We have a 250 observation and 19 feautures/variables, so we can use OLS to find the initial estimation.
+
+```{r}
+# so, we want to fit an ols on the training data
+# transform data so that it can take the lm() function
+olsdata <- data.frame(y = y[train], x[train, ])
+fitols <- lm(y ~ ., data = olsdata)
+
+# then we take the coefficients (other than the intercept as was mentioned in the slides)
+coefols <- coef(fitols)[-1]
+
+# we then make these into the weights like in the slides by dividing 1 with them
+weightols <- 1 / (abs(coefols) + 1e-7) # added 1e-7 since i got a divide by zero error
+
+# then we fit the adaptive lasso using the same glmnet as for lasso, but with the given weights
+cv.adapt <- cv.glmnet(x[train, ], y[train], alpha = 1, penalty.factor = weightols)
+bestlam.adapt <- cv.adapt$lambda.min
+
+# finally, we check the performance on the test set
+adapt.pred <- predict(cv.adapt, s = bestlam.adapt, newx = x[test, ])
+adapt.mse <- mean((adapt.pred - y.test)^2)
+print(paste("Adaptive Lasso Test MSE:", adapt.mse))
+
+```
+Now we have to use information criteria (aic and bic) to find lambda and compare with what we found previously. We will use the ic.glmnet functions from HDeconometrics.
+So, just run lasso and use this function to find aic and bic.
+
+```{r}
+# fit the lasso and find ic in one go
+# first aic
+iclasso <- ic.glmnet(x, y, alpha = 1, crit = "aic")
+
+# Extract non-zero coefficients for AIC
+aiccoef <- iclasso$coef
+aiccoef
+
+# now bic
+iclasso <- ic.glmnet(x, y, alpha = 1, crit = "bic")
+
+# Extract non-zero coefficients for BIC
+biccoef <- iclasso$coef
+biccoef
+
+
+```
+
+Now look at how well we predict the salaries of new players. We have the MSE for all of the previous ones, now we do the prediction for aic and bic, then compare them all.
+
+```{r}
+# aic and bic on training set 
+bicfit <- ic.glmnet(x[train, ], y[train], alpha = 1, crit = "bic")
+aicfit <- ic.glmnet(x[train, ], y[train], alpha = 1, crit = "aic")
+
+# do the predictions
+predbic <- predict(bicfit, newdata = x[test, ])
+predaic <- predict(aicfit, newdata = x[test, ])
+
+# calculate the mse for both 
+bicmse <- mean((predbic - y.test)^2)
+aicmse <- mean((predaic - y.test)^2)
+
+print(paste("BIC Test MSPE:", bicmse))
+print(paste("CV Test MSPE:", aicmse))
+```
+Plot them to visualise:
+
+```{r}
+msevals <- c(ridge.mse, elastic.mse, lasso.mse, adapt.mse, aicmse, bicmse)
+estimators <- c("ridge", "elastic", "lasso", "adap lasso", "aic lasso", "bic lasso")
+
+par(mar = c(5, 5, 4, 2))
+bp <- barplot(msevals, 
+              names.arg = estimators, 
+              col = c("#2b5b84", "#3d82a4", "#55a868", "#c44e52", "#e1a654", "#8172b3"),
+              ylab = "test mean squared error values",
+              main = "test mse comparison",
+              xpd = FALSE) # xpd=FALSE clips the bars to the ylim
 ```
 
