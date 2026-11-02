@@ -1,0 +1,239 @@
+---
+title: "Week2"
+author: "Can"
+date: "2026-11-02"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Tutorial 2 Exercises markdown
+
+# Exercise 2.3
+
+First import the relevant data and create the dataframe
+
+```{r}
+library(glmnet)
+library(effects)
+set.seed(333)
+
+data <- read.csv("utrechthousinglarge.csv")
+
+# i'll also make buildyear into age to keeep it aligned with the exercise
+data$age <- as.numeric(format(Sys.Date(), "%Y")) - data$buildyear
+
+# choose balcony as factor as well, like bathroom but one more option
+data$balcony <- as.factor(data$balcony)
+data$bathrooms <- as.factor(data$bathrooms)
+# also monument and energy efficient for the same reason
+data$monument <- as.factor(data$monument)
+data$energy.eff <- as.factor(data$energy.eff)
+
+# make final dataset without the buildyear (replaced by age) and excluding taxvalue
+data2 <- subset(data, select = -c(buildyear, taxvalue))
+
+```
+
+We did the preprocessing, now we want to use a formula to set up a regression model on all other variables. 
+
+```{r}
+# Create matrix with interactions and polynomials
+ff <- retailvalue ~ .^2 + I(age^2)
+X <- model.matrix(ff, data2)[, -1]
+y <- data2$retailvalue
+
+```
+
+Now set up the training and testing splits and look at how different penalised regressions predict house prices.
+
+```{r}
+# do the split
+train <- sample(1:nrow(X), nrow(X) / 2)
+test <- (-train)
+
+# first, lasso 
+lasso <- cv.glmnet(X[train, ], y[train], alpha = 1)
+lassopred <- predict(lasso, s = "lambda.min", newx = X[test, ])
+lassomse <- mean((lassopred - y[test])^2)
+
+# now ridge
+ridge <- cv.glmnet(X[train, ], y[train], alpha = 0)
+ridgepred <- predict(ridge, s = "lambda.min", newx = X[test, ])
+ridgemse <- mean((ridgepred - y[test])^2)
+
+# and adaptive lasso
+# use the lasso coefficients as an initial estimate
+initial <- as.numeric(coef(lasso, s = "lambda.min"))[-1]
+w <- 1 / abs(initial)
+alasso <- cv.glmnet(X[train, ], y[train], alpha = 1, penalty.factor = w)
+alassopred <- predict(alasso, s = "lambda.min", newx = X[test, ])
+alassomse <- mean((ridgepred - y[test])^2)
+
+plot(lasso, type = "l")
+plot(ridge, type = "l")
+plot(alasso, type = "l")
+
+lsel <- sum(coef(lasso, s = "lambda.min")[-1] != 0)
+rsel <- sum(coef(ridge, s = "lambda.min")[-1] != 0)
+alsel <- sum(coef(alasso, s = "lambda.min")[-1] != 0)
+
+res <- data.frame(RMSE = c(lassomse, ridgemse, alassomse), Selected = c(lsel, rsel, alsel))
+print(res)
+
+```
+We can now do the simulation part of the exercise.
+
+```{r}
+# 1. Create simulated dataframe fixing all variables except 'age'
+sim_data <- data2[rep(1, 100), ] 
+sim_data$age <- seq(min(data2$age), max(data2$age), length.out = 100)
+sim_data$retailvalue <- 0 # Placeholder
+
+# 2. Append to original data, create matrix, and isolate simulated rows
+combined_data <- rbind(data2, sim_data)
+X_combined <- model.matrix(ff, combined_data)[, -1]
+X_sim <- X_combined[(nrow(data2) + 1):nrow(X_combined), ]
+
+# 3. Predict outcomes to plot the marginal effect
+sim_predictions <- predict(lasso, s = "lambda.min", newx = X_sim)
+plot(sim_data$age, sim_predictions, type = "l", 
+     xlab = "Age", ylab = "Predicted Retail Value")
+
+```
+Claudes answer to the effects question:
+
+```{r}
+best_model <- lasso
+pred_vars  <- setdiff(names(data2), "retailvalue")
+
+effect_curve <- function(var, ngrid = 20) {
+  col <- data2[[var]]
+  base <- data2[1, , drop = FALSE]
+  # fix all other variables at median (numeric) or most common level (factor)
+  for (v in pred_vars) {
+    if (is.factor(data2[[v]])) {
+      base[[v]] <- factor(names(which.max(table(data2[[v]]))), levels = levels(data2[[v]]))
+    } else base[[v]] <- median(data2[[v]])
+  }
+  if (is.factor(col)) {
+    vals <- levels(col)
+    new  <- base[rep(1, length(vals)), ]
+    new[[var]] <- factor(vals, levels = levels(col))
+  } else {
+    vals <- seq(quantile(col, 0.05), quantile(col, 0.95), length.out = ngrid)
+    new  <- base[rep(1, ngrid), ]
+    new[[var]] <- vals
+  }
+  # Stack new rows under the original data so dummies/columns match, then drop originals
+  combined <- rbind(data2, new)
+  Xall <- model.matrix(ff, combined)[, -1]
+  Xnew <- Xall[(nrow(data2) + 1):nrow(combined), , drop = FALSE]
+  list(x = vals, pred = as.numeric(predict(best_model, Xnew, s = "lambda.min")))
+}
+ 
+curves <- lapply(pred_vars, effect_curve); names(curves) <- pred_vars
+
+# Plot each effect
+par(mar = c(1,1,1,1))
+for (v in pred_vars) {
+  cu <- curves[[v]]
+  if (is.character(cu$x)) barplot(cu$pred, names.arg = cu$x, main = v, ylab = "predicted value")
+  else plot(cu$x, cu$pred, type = "l", main = v, xlab = v, ylab = "predicted value")
+}
+ 
+# Importance = range of predicted price when varying that variable only
+importance <- sort(sapply(curves, function(cu) diff(range(cu$pred))), decreasing = TRUE)
+print(importance)
+par(mfrow = c(1, 1)); barplot(rev(importance), horiz = TRUE, las = 1,
+                              main = "Effect range by original variable")
+ 
+```
+
+
+# Exercise 2.4
+
+Time for the monte carlo simulation to see how often they pick the relevant variables.
+
+First need to implement all the processes for the simulation.
+
+```{r}
+# define parameters
+n     <- 50     
+p     <- 10       
+R     <- 1000  
+sigma <- 1       
+
+# then the coefficients
+# use rep() to set the remaining beta coefs to 1 value
+beta       <- c(2, -1, 1, -1, 1, rep(0, p - 5))
+relevant   <- which(beta != 0)    
+irrelevant <- which(beta == 0)    
+
+# make a matrix that tracks the 2 types of mistakes each regression makes
+irrelsel <- matrix(NA, nrow = R, ncol = 4, dimnames = list(NULL, c("lasso", "ridge", "enet", "adaptive")))
+relnsel <- matrix(NA, nrow = R, ncol = 4, dimnames = list(NULL, c("lasso", "ridge" , "enet", "adaptive")))
+
+# now for the simulation loop
+for (r in 1:R) {
+  # initialise the normal distribution we need for eps and x
+  # separately to make them different, and x needs to be a matrix to work
+  z   <- matrix(rnorm(n * p), n, p)
+  x   <- 1 * z 
+  eps <- rnorm(n, mean = 0, sd = sigma)
+  
+  # use %*% for matrix multiplication
+  y   <- X %*% beta + eps
+  
+  # now start with the regressions
+  # first lasso
+  lassocv <- cv.glmnet(X, y, alpha = 1)
+  lassob  <- as.numeric(coef(lassocv, s = "lambda.min"))[-1]
+  
+  # elastic net 
+  encv <- cv.glmnet(X, y, alpha = 0.5)
+  enb  <- as.numeric(coef(encv, s = "lambda.min"))[-1]
+  
+  # ridge for fun
+  ridgecv <- cv.glmnet(X, y, alpha = 0)
+  ridgeb <- as.numeric(coef(ridgecv, s = "lambda.min"))[-1]
+
+  # adaptive lasso using ridge coefficients as initial estimators
+  w        <- 1 / abs(ridgeb)                                   
+  alcv  <- cv.glmnet(X, y, alpha = 1, penalty.factor = w)
+  alb   <- as.numeric(coef(alcv, s = "lambda.min"))[-1]
+  
+  # look at which vars were selected
+  sel <- cbind(lassob != 0, enb != 0, ridgeb != 0, alb != 0) 
+  
+  irrelsel[r, ] <- colSums(sel[irrelevant, ])      # irrelevant variables that were selected
+  relnsel[r, ] <- colSums(!sel[relevant, ])
+  
+}
+  
+```
+
+See what this results in:
+
+```{r}
+results <- rbind("avg false positives (out of p-5)" = colMeans(irrelsel),
+                 "avg false negatives (out of 5)"   = colMeans(relnsel)
+                 )
+print(round(results, 3))
+```
+
+
+# Exercise 2.5
+
+```{r}
+library(lars); library(glmnet)
+fit_lar   <- lars(X, y, type = "lar")
+fit_lasso <- lars(X, y, type = "lasso")
+par(mfrow = c(1, 2)); plot(fit_lar); plot(fit_lasso)   # compare the paths
+cv <- cv.lars(X, y, K = 10, type = "lasso")             # CV over the fraction s
+coef(fit_lasso, s = cv$index[which.min(cv$cv)], mode = "fraction")
+fit_cd <- glmnet(X, y)                                  # coordinate descent for comparison
+```
+
