@@ -237,3 +237,14 @@ coef(fit_lasso, s = cv$index[which.min(cv$cv)], mode = "fraction")
 fit_cd <- glmnet(X, y)                                  # coordinate descent for comparison
 ```
 
+## Tutorial 3
+
+# Exercise 3.2
+
+For this exercise we look at the data for credit modelling.
+Our main focus is to model the probability of a credit default using penalised regression. 
+
+```{r}
+
+```
+
