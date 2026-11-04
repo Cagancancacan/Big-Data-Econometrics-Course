@@ -185,24 +185,24 @@ for (r in 1:R) {
   eps <- rnorm(n, mean = 0, sd = sigma)
   
   # use %*% for matrix multiplication
-  y   <- X %*% beta + eps
+  y   <- x %*% beta + eps
   
   # now start with the regressions
   # first lasso
-  lassocv <- cv.glmnet(X, y, alpha = 1)
+  lassocv <- cv.glmnet(x, y, alpha = 1)
   lassob  <- as.numeric(coef(lassocv, s = "lambda.min"))[-1]
   
   # elastic net 
-  encv <- cv.glmnet(X, y, alpha = 0.5)
+  encv <- cv.glmnet(x, y, alpha = 0.5)
   enb  <- as.numeric(coef(encv, s = "lambda.min"))[-1]
   
   # ridge for fun
-  ridgecv <- cv.glmnet(X, y, alpha = 0)
+  ridgecv <- cv.glmnet(x, y, alpha = 0)
   ridgeb <- as.numeric(coef(ridgecv, s = "lambda.min"))[-1]
 
   # adaptive lasso using ridge coefficients as initial estimators
   w        <- 1 / abs(ridgeb)                                   
-  alcv  <- cv.glmnet(X, y, alpha = 1, penalty.factor = w)
+  alcv  <- cv.glmnet(x, y, alpha = 1, penalty.factor = w)
   alb   <- as.numeric(coef(alcv, s = "lambda.min"))[-1]
   
   # look at which vars were selected
@@ -229,12 +229,12 @@ print(round(results, 3))
 
 ```{r}
 library(lars); library(glmnet)
-fit_lar   <- lars(X, y, type = "lar")
-fit_lasso <- lars(X, y, type = "lasso")
+fit_lar   <- lars(x, y, type = "lar")
+fit_lasso <- lars(x, y, type = "lasso")
 par(mfrow = c(1, 2)); plot(fit_lar); plot(fit_lasso)   # compare the paths
-cv <- cv.lars(X, y, K = 10, type = "lasso")             # CV over the fraction s
+cv <- cv.lars(x, y, K = 10, type = "lasso")             # CV over the fraction s
 coef(fit_lasso, s = cv$index[which.min(cv$cv)], mode = "fraction")
-fit_cd <- glmnet(X, y)                                  # coordinate descent for comparison
+fit_cd <- glmnet(x, y)                                  # coordinate descent for comparison
 ```
 
 ## Tutorial 3
@@ -244,7 +244,73 @@ fit_cd <- glmnet(X, y)                                  # coordinate descent for
 For this exercise we look at the data for credit modelling.
 Our main focus is to model the probability of a credit default using penalised regression. 
 
-```{r}
+As categorical variables, I choose (based on website):
+- CAT_GAMBLING: Gambling category (none, low, high)
+- CAT_DEBT: 1 if the customer has debt; 0 otherwise
+- CAT_CREDIT_CARD: 1 if the customer has a credit card; 0 otherwise
+- CAT_MORTGAGE: 1 if the customer has a mortgage; 0 otherwise
+I exclude CAT_SAVINGS_ACCOUNT and CAT_DEPENDENTS as I dont find them relevant enough (arbitrary)
 
+Want to investigate how different penalised regressions perform in predicting probability of default and to understand which factors are important to determine that probability. 
+
+```{r}
+datacredit <- read.csv("credit_score.csv")
+
+# set the categoirical terms we chose
+datacredit$CAT_GAMBLING <- as.factor(datacredit$CAT_GAMBLING)
+datacredit$CAT_DEBT <- as.factor(datacredit$CAT_DEBT)
+datacredit$CAT_CREDIT_CARD <- as.factor(datacredit$CAT_CREDIT_CARD)
+datacredit$CAT_MORTGAGE <- as.factor(datacredit$CAT_MORTGAGE)
+
+# now get rid of unneeded data columns
+datacredit$CUST_ID <- NULL
+
+# define the X and y, want to test for default
+X <- model.matrix(DEFAULT ~ ., data = datacredit)[, -1]
+y <- datacredit$DEFAULT
+
+# set the training and testing samples
+traintest <- sample(1:nrow(X), size = 0.8 * nrow(X))
+xtrain <- X[traintest, ]
+ytrain <- y[traintest]
+xtest <- X[-traintest, ]
+ytest <- y[-traintest]
+
+# Scale features
+xscale <- scale(X)
+xtrainscale <- scale(xtrain)
+xtestscale <- scale(xtest, 
+                       center = attr(xtrainscale, "scaled:center"), 
+                       scale = attr(xtrainscale, "scaled:scale"))
+
+```
+
+We have the data ready now, so we can look at how the regressions perform. For the cross validation I'll use k-fold, since the data isn't a time series.
+I'll try to include as many as possible.
+
+```{r}
+# first basic lasso
+# apparently should inlude "binomial" since default is a binary outcome
+lassocv <- cv.glmnet(xtrainscale, ytrain, family = "binomial", alpha = 1, nfolds = 5)
+
+# can then predict using this cross validated lasso
+# Predict classes ("class") using the optimal lambda strictly minimizing CV error
+y_pred <- predict(lassocv, s = "lambda.min", newx = xtestscale, type = "class")
+test_accuracy <- mean(as.numeric(y_pred) == ytest)
+
+print(paste("Optimal lambda:", round(lassocv$lambda.min, 4)))
+print(paste("Out-of-Sample Test Accuracy:", round(test_accuracy, 4)))
+
+
+# Get important features
+# Extract coefficients and remove the intercept
+coefsl <- as.matrix(coef(lassocv))[-1, , drop = FALSE]
+
+# Filter non-zero coefficients and sort by absolute value
+important_features <- coefsl[coefsl[, 1] != 0, , drop = FALSE]
+important_features <- important_features[order(abs(important_features[, 1]), decreasing = TRUE), , drop = FALSE]
+
+print("Top 10 features selected by Lasso Logistic Regression:")
+print(head(important_features, 10))
 ```
 
