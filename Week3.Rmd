@@ -1,0 +1,82 @@
+---
+
+title: "Week3"
+author: "Can"
+date: "2026-11-06"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Big Data Econometrics - Week 3 
+
+# Exercise 4.3
+
+We will be using factor models to see if we could have predicted large (recent) inflation.
+We will use the monthly FRED data to conduct the analysis.
+
+First, we have to import and retrieve the necessary data from the dataset using the given "Exercise_4_3_preparation.R" file.
+
+```{r}
+# import relevant packages
+library(bootUR)
+library(zoo)
+library(dfms)
+set.seed(333)
+
+# use the given .r file to get the data
+source("Exercise_4_3_preparation.R")
+
+```
+
+We can now start with the processing.
+
+```{r}
+# so we will take the cpi from the transformed data
+infl <- as.numeric(fred_final$CPIAUCSL)
+plot(as.Date(dates), infl, type = "l", xlab = "", ylab = "CPI inflation (monthly)")
+
+# initialise the horizons to use
+h1 <- 1
+h3 <- 3
+h6 <- 6
+window <- 240 # 20 years
+
+```
+
+Now we need to do the rolling window predictions.
+
+```{r}
+# initialise all necessary aspects for the rolling window
+dates <- index(fred_final)
+x_all <- as.matrix(fred_final[, colnames(fred_final) != "CPIAUCSL"])
+
+
+# set the training range
+train_end_date <- as.yearmon("Dec 2014")
+train_idx      <- which(dates <= train_end_date)
+
+# set the training dates
+xtrain <- x_all[train_idx,]
+
+
+ic <- ICr(xtrain, max.r = 20)
+print(ic)       # shows the criteria for each number of factors
+plot(ic)        # scree plot / IC curves
+ic$r.star       # optimal number of factors according to IC1, IC2, IC3
+
+r <- ic$r.star[1]   # use IC1 (check the printout; pick whichever you prefer)
+r
+```
+
+
+# Exercise 5.3
+
+In this exercise we try to extract underlying factors for student stress.
+
+```{r}
+
+```
+

@@ -163,7 +163,7 @@ First need to implement all the processes for the simulation.
 # define parameters
 n     <- 50     
 p     <- 10       
-R     <- 1000  
+R     <- 100
 sigma <- 1       
 
 # then the coefficients
@@ -254,6 +254,11 @@ I exclude CAT_SAVINGS_ACCOUNT and CAT_DEPENDENTS as I dont find them relevant en
 Want to investigate how different penalised regressions perform in predicting probability of default and to understand which factors are important to determine that probability. 
 
 ```{r}
+# initialise
+library(glmnet)
+library(HDeconometrics)
+
+set.seed(333)
 datacredit <- read.csv("credit_score.csv")
 
 # set the categoirical terms we chose
@@ -270,14 +275,16 @@ X <- model.matrix(DEFAULT ~ ., data = datacredit)[, -1]
 y <- datacredit$DEFAULT
 
 # set the training and testing samples
-traintest <- sample(1:nrow(X), size = 0.8 * nrow(X))
-xtrain <- X[traintest, ]
-ytrain <- y[traintest]
-xtest <- X[-traintest, ]
-ytest <- y[-traintest]
+train_indices <- sample(1:nrow(X), size = 0.8 * nrow(X))
+xtrain <- scale(X[train_indices, ])
+ytrain <- y[train_indices]
 
+# Scale test set using training set parameters
+xtest <- scale(X[-train_indices, ], 
+                center = attr(xtrain, "scaled:center"), 
+                scale = attr(xtrain, "scaled:scale"))
+ytest <- y[-train_indices]
 # Scale features
-xscale <- scale(X)
 xtrainscale <- scale(xtrain)
 xtestscale <- scale(xtest, 
                        center = attr(xtrainscale, "scaled:center"), 
@@ -287,6 +294,13 @@ xtestscale <- scale(xtest,
 
 We have the data ready now, so we can look at how the regressions perform. For the cross validation I'll use k-fold, since the data isn't a time series.
 I'll try to include as many as possible.
+The list of penalised regressions:
+- Lasso regression (k fold, AIC, BIC)
+- Elastic Net
+- Ridge regression
+- Aaptive lasso
+
+Start with the Lasso (with cross validation method).
 
 ```{r}
 # first basic lasso
@@ -312,5 +326,80 @@ important_features <- important_features[order(abs(important_features[, 1]), dec
 
 print("Top 10 features selected by Lasso Logistic Regression:")
 print(head(important_features, 10))
+```
+Now the information criteria lasso
+
+```{r}
+# ic.glmnet for aic
+laic <- ic.glmnet(xtrain, ytrain, family = "binomial", alpha = 1, crit = "aic")
+laicpred <- predict(laic, newdata = xtest, type = "response")
+laicmse <- mean((laicpred - ytest)^2)
+
+# ic.glmnet for bic
+lbic <- ic.glmnet(xtrain, ytrain, family = "binomial", alpha = 1, crit = "bic")
+lbicpred <- predict(lbic, newdata = xtest, type = "response")
+lbicmse <- mean((lbicpred - ytest)^2)
+
+```
+
+
+
+Now ridge.
+
+```{r}
+# do a normal ridge regression
+ridgecv <- cv.glmnet(xtrain, ytrain, family = "binomial", alpha = 0)
+ridgepred <- predict(ridgecv, s = "lambda.min", newx = xtest, type = "response")
+ridgemse <- mean((ridgepred - ytest)^2)
+
+```
+
+
+
+Now elastic net.
+
+```{r}
+# elastic net like ridge
+elasticcv <- cv.glmnet(xtrain, ytrain, family = "binomial", alpha = 0.5)
+elasticpred <- predict(elasticcv, s = "lambda.min", newx = xtest, type = "response")
+elasticmse <- mean((elasticpred - ytest)^2)
+
+```
+
+
+Now adaptive lasso.
+
+```{r}
+# use ridge cv as initial estimation 
+coef_init <- as.matrix(coef(ridgecv, s = "lambda.min"))[-1, ]
+# get weights
+weights <- 1 / (abs(coef_init) + 1e-7)
+
+adaptcv <- cv.glmnet(xtrain, ytrain, family = "binomial", alpha = 1, penalty.factor = weights)
+adaptpred <- predict(adaptcv, s = "lambda.min", newx = xtest, type = "response")
+adaptmse <- mean((adaptpred - ytest)^2)
+
+```
+
+
+```{r}
+results_table <- data.frame(
+  Model = c("Ridge", "Elastic Net", "Lasso (CV)", "Adaptive Lasso", "Lasso (AIC)", "Lasso (BIC)"),
+  Test_MSPE = round(c(ridgemse, elasticmse, lassomse, adaptmse, laicmse, lbicmse), 4)
+)
+
+print("--- Test MSPE Comparison ---")
+print(results_table)
+
+# Generate Bar Plot
+par(mar = c(5, 5, 4, 2))
+bp <- barplot(results_table$Test_MSPE, 
+              names.arg = results_table$Model, 
+              col = c("#2b5b84", "#3d82a4", "#55a868", "#c44e52", "#e1a654", "#8172b3"),
+              ylab = "Test Mean Squared Prediction Error",
+              main = "Test MSPE Comparison of Regularization Methods",
+              las = 2, # Rotate x-axis labels if needed
+              ylim = c(min(results_table$Test_MSPE) * 0.9, max(results_table$Test_MSPE) * 1.05),
+              xpd = FALSE)
 ```
 
