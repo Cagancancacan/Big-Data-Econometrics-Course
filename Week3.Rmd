@@ -36,17 +36,55 @@ We can now start with the processing.
 ```{r}
 # so we will take the cpi from the transformed data
 infl <- as.numeric(fred_final$CPIAUCSL)
-plot(as.Date(dates), infl, type = "l", xlab = "", ylab = "CPI inflation (monthly)")
+dates <- index(fred_final)
+X_all <- as.matrix(fred_final[, colnames(fred_final) != "CPIAUCSL"])
 
+plot(as.Date(dates), infl, type = "l", ylab = "cpi inflation (monthly)")
+plot(fred_final$CPIAUCSL)
 # initialise the horizons to use
 h1 <- 1
 h3 <- 3
 h6 <- 6
-window <- 240 # 20 years
 
 ```
 
 Now we need to do the rolling window predictions.
+
+```{r}
+# set the parameters for the rolling window
+window <- 240 # 20 years
+h <- h1
+
+n <- length(infl)
+first <- as.yearmon("Jan 1995")
+last <- as.yearmon("Dec 2014")
+lastlast <- as.yearmon("Dec 2021")
+
+firstind <- max(which(dates <= first))
+lastind <- max(which(dates <= last))
+lastlastind <- max(which(dates <= lastlast))
+
+endlast <- lastlastind - h # the final window's start index
+endindices <- lastind:lastlastind 
+
+```
+
+Now do th emodel 
+
+```{r}
+forecast <- function(u = infl, v = X_all) {
+  # window_data arrives as a mini zoo object
+  model <- lm(u ~ v)
+  
+  # Predict 1 step ahead of this specific window's end date
+  next_day <- max(v) + 1
+  return(predict(model, newdata = data.frame(window = next_day)))
+}
+
+#rollapply(fred_final, width = 10, FUN = forecast, align = "right", by.column = TRUE)
+
+```
+
 
 ```{r}
 # initialise all necessary aspects for the rolling window
@@ -76,7 +114,344 @@ r
 
 In this exercise we try to extract underlying factors for student stress.
 
+Start with instantiating everything we need.
+
 ```{r}
+#install.packages(c("psych", "glmnet", "corrplot", "ggplot2", "GPArotation"))
+library(glmnet)
+library(ggplot2)
+library(dfms)
+
+library(corrplot)
+library(psych)
+set.seed(333)
+
+# import data
+stress_data <- read.csv("StressLevelDataset.csv", stringsAsFactors = FALSE)
+
+# check what the structure is like
+str(stress_data)
+cat("Missing values in dataset:", sum(is.na(stress_data)), "\n")
 
 ```
 
+Now we set up the system such that we separate the dependent variable (target var.) and the predictors
+
+```{r}
+yvar <- "academic_performance"
+
+y <- stress_data[[yvar]]
+X <- stress_data[, names(stress_data) != yvar]
+
+# Standardize predictors for PCA/Factor Analysis
+Xmat <- as.matrix(X)
+Xscaled <- scale(Xmat)
+
+n <- nrow(X)
+p <- ncol(X)
+
+```
+
+Now we can explore the data to find the PC and estimate the factors.
+
+```{r}
+# see what we get from the information criteria
+ic <- ICr(Xscaled, max.r = min(20, ncol(X) - 1))
+plot(ic)
+ic$r.star
+
+# then look at the scree plot
+pca <-  prcomp(Xscaled, center = FALSE, scale. = FALSE)
+pca
+
+# visualise the change in residual variance
+screeplot(pca, npcs = 20, type = "lines", main = "Scree plot")
+
+```
+
+The information criteria gives 19 (the max), but I would choose 3 from the scree plot (based on the lack of improvement after that).
+Now continue to the getting the F matrix
+
+```{r}
+# set the chosen r value
+r <- 3
+F_hat <- pca$x[, 1:r, drop = FALSE]
+colnames(F_hat) <- paste0("F", 1:r)
+
+# look at the rotation matrix to find the loadings for the factors
+loadingsF <- pca$rotation[, 1:r, drop = FALSE]
+loadingsF
+
+```
+The loadings seem to make sense. The first factor shows that there are positive loadings between self-esteem, sleep_quality, safety, etc. These are all reasonable things that would drive one to have "good" grades.
+
+Now do the prediction/forecasting and compare performance.
+
+```{r}
+# do forecasting on different training sets (the types mentioned in the exercise)
+train_idx <- sample(1:n, size = 0.7 * n)
+test_idx  <- setdiff(1:n, train_idx)
+
+y_train <- y[train_idx]
+y_test  <- y[test_idx]
+
+# original features
+X_train <- Xscaled[train_idx, ]
+X_test  <- Xscaled[test_idx, ]
+
+# extracted factors
+F_train <- F_hat[train_idx, ]
+F_test  <- F_hat[test_idx, ]
+
+# hybrid data (original features + factors)
+X_hybrid_train <- cbind(X_train, F_train)
+X_hybrid_test  <- cbind(X_test, F_test)
+
+
+# -----------------------------------------------------------------------------
+# Fit Original Features Only (Lasso & Ridge)
+# -----------------------------------------------------------------------------
+# lasso (alpha = 1)
+cv_lasso_orig <- cv.glmnet(X_train, y_train, alpha = 1)
+pred_m1_lasso <- predict(cv_lasso_orig, s = "lambda.min", newx = X_test)
+mspe_m1_lasso <- mean((y_test - as.vector(pred_m1_lasso))^2)
+
+# ridge (alpha = 0)
+cv_ridge_orig <- cv.glmnet(X_train, y_train, alpha = 0)
+pred_m1_ridge <- predict(cv_ridge_orig, s = "lambda.min", newx = X_test)
+mspe_m1_ridge <- mean((y_test - as.vector(pred_m1_ridge))^2)
+
+# -----------------------------------------------------------------------------
+# Fit Factors Only (OLS)
+# -----------------------------------------------------------------------------
+fit_factors <- lm(y_train ~ ., data = as.data.frame(F_train))
+pred_m2 <- predict(fit_factors, newdata = as.data.frame(F_test))
+mspe_m2 <- mean((y_test - pred_m1)^2)
+
+
+# -----------------------------------------------------------------------------
+# Fit Hybrid (Factors + Original Features, Elastic Net / Lasso)
+# -----------------------------------------------------------------------------
+cv_hybrid_lasso <- cv.glmnet(X_hybrid_train, y_train, alpha = 1)
+pred_m3_hybrid <- predict(cv_hybrid_lasso, s = "lambda.min", newx = X_hybrid_test)
+mspe_m3_hybrid <- mean((y_test - as.vector(pred_m3_hybrid))^2)
+
+# -----------------------------------------------------------------------------
+# Summary of Results
+# -----------------------------------------------------------------------------
+results_table <- data.frame(
+  Model = c("Original Features (Lasso)", 
+            "Original Features (Ridge)",
+            "Factors Only (OLS)", 
+            "Hybrid: Features + Factors (Lasso)"),
+  Test_MSPE = c(mspe_m1, mspe_m2_lasso, mspe_m2_ridge, mspe_m3_hybrid),
+  Relative_to_Factors = c(1.00, mspe_m2_lasso / mspe_m1, 
+                          mspe_m2_ridge / mspe_m1, mspe_m3_hybrid / mspe_m1)
+)
+
+print((results_table))
+```
+
+Now visualise the performances.
+
+```{r}
+# Comparison Plot of Test Prediction Errors (MSPE)
+ggplot(results_table, aes(x = reorder(Model, Test_MSPE), y = Test_MSPE, fill = Model)) +
+  geom_bar(stat = "identity", width = 0.55, show.legend = FALSE) +
+  geom_text(aes(label = round(Test_MSPE, 4)), vjust = -0.4, size = 3.8) +
+  labs(
+    title = "Academic Performance Prediction: Test MSPE Comparison",
+    x = "Model Specification",
+    y = "Mean Squared Prediction Error (MSPE)"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 15, hjust = 1))
+```
+
+# alternative by gemini
+
+```{r}
+# 1. Prepare data (excluding academic performance)
+k_max <- min(10, p - 1)  # Maximum candidate factors to check
+
+# 2. Compute Eigen-decomposition of X'X (slide formula for n > p)
+XtX <- t(Xmat) %*% Xmat
+eig <- eigen(XtX)
+
+eigen_values  <- eig$values
+eigen_vectors <- eig$vectors  # Lambda_hat matrix
+
+# 3. Calculate V(k), R^2(k), and Bai & Ng Criteria for k = 0, ..., k_max
+V_k <- numeric(k_max + 1)
+R2_k <- numeric(k_max + 1)
+
+# k = 0 (no factors, residual is X itself)
+V_k[1]  <- sum(X^2) / (n * p)  # Equals 1 due to standardization
+R2_k[1] <- 0
+
+# Loop for k = 1 to k_max
+for (k in 1:k_max) {
+  # Loadings: sqrt(p) * eigenvectors so that Lambda'Lambda / p = I_k
+  Lambda_k <- eigen_vectors[, 1:k, drop = FALSE] * sqrt(p)
+  
+  # Factor estimates: F_hat = X * Lambda_hat / p
+  F_k <- (Xmat %*% Lambda_k) / p
+  
+  # Residuals: X - F_hat * Lambda_hat'
+  E_k <- Xmat - F_k %*% t(Lambda_k)
+  
+  V_k[k + 1]  <- sum(E_k^2) / (n * p)
+  R2_k[k + 1] <- 1 - V_k[k + 1]
+}
+
+# 4. Penalty functions from the slides
+g1 <- ((n + p) / (n * p)) * log((n * p) / (n + p))
+g2 <- ((n + p) / (n * p)) * log(min(n, p))
+g3 <- log(min(n, p)) / min(n, p)
+
+sigma_nu2 <- V_k[k_max + 1]  # V(k_max)
+k_grid <- 0:k_max
+
+# Compute Information Criteria tables
+IC1 <- log(V_k) + k_grid * g1
+IC2 <- log(V_k) + k_grid * g2
+IC3 <- log(V_k) + k_grid * g3
+
+PC1 <- V_k + k_grid * sigma_nu2 * g1
+PC2 <- V_k + k_grid * sigma_nu2 * g2
+PC3 <- V_k + k_grid * sigma_nu2 * g3
+
+ic_summary <- data.frame(
+  k = k_grid,
+  V_k = round(V_k, 4),
+  R2 = round(R2_k, 4),
+  Delta_R2 = c(0, round(diff(R2_k), 4)),
+  IC1 = round(IC1, 4),
+  IC2 = round(IC2, 4),
+  IC3 = round(IC3, 4),
+  PC1 = round(PC1, 4),
+  PC2 = round(PC2, 4),
+  PC3 = round(PC3, 4)
+)
+print(ic_summary)
+
+# Identify optimal r for each criterion (ignoring k=0)
+r_hat_IC1 <- which.min(IC1[-1])
+r_hat_IC2 <- which.min(IC2[-1])
+r_hat_IC3 <- which.min(IC3[-1])
+cat(sprintf("\nOptimal number of factors selected:\nIC1: %d | IC2: %d | IC3: %d\n", 
+            r_hat_IC1, r_hat_IC2, r_hat_IC3))
+```
+
+```{r}
+# Replicate Smeekes Slide Scree Plot
+delta_R2 <- diff(R2_k)
+
+plot(1:k_max, delta_R2, type = "b", pch = 19, col = "black",
+     xlab = "k", ylab = expression(R^2*(k) - R^2*(k-1)),
+     main = "Scree Plot of Marginal Explained Variance",
+     ylim = c(0, max(delta_R2) * 1.1))
+# Add red vertical line at r_hat from IC
+abline(v = r_hat_IC2, col = "red", lwd = 2, lty = 2)
+legend("topright", legend = c(expression(Delta*R^2), expression(hat(r)[IC])),
+       col = c("black", "red"), lty = c(1, 2), pch = c(19, NA), lwd = c(1, 2))
+```
+
+```{r}
+r_chosen <- r_hat_IC2
+
+# Extract eigenvectors corresponding to r largest eigenvalues
+Lambda_hat <- eigen_vectors[, 1:r_chosen, drop = FALSE] * sqrt(p)
+colnames(Lambda_hat) <- paste0("Factor_", 1:r_chosen)
+rownames(Lambda_hat) <- colnames(X)
+
+# Calculate factor matrix: F_hat = X * Lambda_hat / p (dimension: n x r)
+F_hat <- (Xmat %*% Lambda_hat) / p
+colnames(F_hat) <- paste0("Factor_", 1:r_chosen)
+
+# Verify normalization from slides: F'F / n should be diagonal, Lambda'Lambda / p = I_r
+cat("Check Lambda'Lambda / p (Identity):\n")
+print(round(t(Lambda_hat) %*% Lambda_hat / p, 4))
+
+head(F_hat)
+```
+```{r}
+# do forecasting on different training sets (the types mentioned in the exercise)
+train_idx <- sample(1:n, size = 0.7 * n)
+test_idx  <- setdiff(1:n, train_idx)
+
+y_train <- y[train_idx]
+y_test  <- y[test_idx]
+
+# original features
+X_train <- Xscaled[train_idx, ]
+X_test  <- Xscaled[test_idx, ]
+
+# extracted factors
+F_train <- F_hat[train_idx, ]
+F_test  <- F_hat[test_idx, ]
+
+# hybrid data (original features + factors)
+X_hybrid_train <- cbind(X_train, F_train)
+X_hybrid_test  <- cbind(X_test, F_test)
+
+
+# -----------------------------------------------------------------------------
+# Fit Original Features Only (Lasso & Ridge)
+# -----------------------------------------------------------------------------
+# lasso (alpha = 1)
+cv_lasso_orig <- cv.glmnet(X_train, y_train, alpha = 1)
+pred_m1_lasso <- predict(cv_lasso_orig, s = "lambda.min", newx = X_test)
+mspe_m1_lasso <- mean((y_test - as.vector(pred_m1_lasso))^2)
+
+# ridge (alpha = 0)
+cv_ridge_orig <- cv.glmnet(X_train, y_train, alpha = 0)
+pred_m1_ridge <- predict(cv_ridge_orig, s = "lambda.min", newx = X_test)
+mspe_m1_ridge <- mean((y_test - as.vector(pred_m1_ridge))^2)
+
+# -----------------------------------------------------------------------------
+# Fit Factors Only (OLS)
+# -----------------------------------------------------------------------------
+fit_factors <- lm(y_train ~ ., data = as.data.frame(F_train))
+pred_m2 <- predict(fit_factors, newdata = as.data.frame(F_test))
+mspe_m2 <- mean((y_test - pred_m1)^2)
+
+
+# -----------------------------------------------------------------------------
+# Fit Hybrid (Factors + Original Features, Elastic Net / Lasso)
+# -----------------------------------------------------------------------------
+cv_hybrid_lasso <- cv.glmnet(X_hybrid_train, y_train, alpha = 1)
+pred_m3_hybrid <- predict(cv_hybrid_lasso, s = "lambda.min", newx = X_hybrid_test)
+mspe_m3_hybrid <- mean((y_test - as.vector(pred_m3_hybrid))^2)
+
+# -----------------------------------------------------------------------------
+# Summary of Results
+# -----------------------------------------------------------------------------
+results_table <- data.frame(
+  Model = c("Original Features (Lasso)", 
+            "Original Features (Ridge)",
+            "Factors Only (OLS)", 
+            "Hybrid: Features + Factors (Lasso)"),
+  Test_MSPE = c(mspe_m1, mspe_m2_lasso, mspe_m2_ridge, mspe_m3_hybrid),
+  Relative_to_Factors = c(1.00, mspe_m2_lasso / mspe_m1, 
+                          mspe_m2_ridge / mspe_m1, mspe_m3_hybrid / mspe_m1)
+)
+
+print((results_table))
+```
+
+Now visualise the performances.
+
+```{r}
+# Comparison Plot of Test Prediction Errors (MSPE)
+ggplot(results_table, aes(x = reorder(Model, Test_MSPE), y = Test_MSPE, fill = Model)) +
+  geom_bar(stat = "identity", width = 0.55, show.legend = FALSE) +
+  geom_text(aes(label = round(Test_MSPE, 4)), vjust = -0.4, size = 3.8) +
+  labs(
+    title = "Academic Performance Prediction: Test MSPE Comparison",
+    x = "Model Specification",
+    y = "Mean Squared Prediction Error (MSPE)"
+  ) +
+  theme_minimal() +
+  theme(axis.text.x = element_text(angle = 15, hjust = 1))
+```

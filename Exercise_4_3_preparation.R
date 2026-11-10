@@ -33,7 +33,7 @@ fred_diff <- diff_mult(fred_tseries, n_diff)
 
 # For the sake of the exercise, we are only going to consider data from 1995 on
 # Restrict data to January 1995 through January 2022
-fred_final <- fred_diff[index(fred_diff) >= "jan 1995" & index(fred_diff) <= "jan 2022"]
+fred_final <- fred_diff[index(fred_diff) >= "jan 1995" & index(fred_diff) <= "dec 2021"]
 
 # Let's check if there are still missing data
 bootUR::plot_missing_values(fred_final)
