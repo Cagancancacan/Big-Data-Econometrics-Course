@@ -1,0 +1,155 @@
+---
+title: "Week4"
+author: "Can"
+date: "2026-11-23"
+output: html_document
+---
+
+```{r setup, include=FALSE}
+knitr::opts_chunk$set(echo = TRUE)
+```
+
+## Tutorial Exercise Week 4 Markdown
+
+```{r}
+# Load required packages
+library(xts)
+library(sandwich)
+library(lmtest)
+
+# 1. Load data and align dates safely
+load("Data_Ex7_3.RData")
+returns <- returns[index(ff), ]  # Ensure identical date index
+alpha <- 0.05
+
+# Compute excess returns for every stock (R_i - RF)
+rf <- as.numeric(ff$RF)
+excess_returns <- sweep(as.matrix(returns), 1, rf, FUN = "-")
+
+# Factor data frame
+factors_df <- as.data.frame(ff)
+stock_names <- colnames(excess_returns)
+S <- ncol(excess_returns)
+
+# 2. Run CAPM, FF3, and FF5 for each stock with HC-robust SEs
+run_factor_tests <- function(formula_rhs) {
+  alphas <- numeric(S)
+  pvals  <- numeric(S)
+  names(alphas) <- names(pvals) <- stock_names
+  
+  for (i in seq_len(S)) {
+    df_i <- cbind(y = excess_returns[, i], factors_df)
+    fit  <- lm(as.formula(paste("y ~", formula_rhs)), data = df_i)
+    
+    # Heteroskedasticity-robust inference on the intercept (row 1)
+    ct <- coeftest(fit, vcov. = vcovHC(fit, type = "HC3"))
+    alphas[i] <- ct[1, "Estimate"]
+    pvals[i]  <- ct[1, "Pr(>|t|)"]
+  }
+  list(alphas = alphas, pvals = pvals)
+}
+
+res_capm <- run_factor_tests("Mkt_RF")
+res_ff3  <- run_factor_tests("Mkt_RF + SMB + HML")
+res_ff5  <- run_factor_tests("Mkt_RF + SMB + HML + RMW + CMA")
+
+# 3. Manual implementations of multiple testing p-value adjustments
+adjust_bonferroni <- function(p) {
+  pmin(length(p) * p, 1)
+}
+
+adjust_holm <- function(p) {
+  m <- length(p)
+  ord <- order(p)
+  p_adj_ord <- pmin(1, cummax((m:1) * p[ord]))
+  p_adj <- numeric(m)
+  p_adj[ord] <- p_adj_ord
+  names(p_adj) <- names(p)
+  p_adj
+}
+
+adjust_bh <- function(p) {
+  m <- length(p)
+  ord <- order(p)
+  p_adj_ord <- pmin(1, rev(cummin(rev((m / seq_len(m)) * p[ord]))))
+  p_adj <- numeric(m)
+  p_adj[ord] <- p_adj_ord
+  names(p_adj) <- names(p)
+  p_adj
+}
+
+# Verify manual functions match built-in p.adjust()
+stopifnot(
+  all.equal(adjust_bonferroni(res_capm$pvals), p.adjust(res_capm$pvals, "bonferroni")),
+  all.equal(adjust_holm(res_capm$pvals),       p.adjust(res_capm$pvals, "holm")),
+  all.equal(adjust_bh(res_capm$pvals),         p.adjust(res_capm$pvals, "BH"))
+)
+
+# 4. Summarize rejections across models and adjustment methods
+summarize_rejections <- function(res, level = alpha) {
+  p <- res$pvals
+  c(
+    Unadjusted = sum(p <= level),
+    BH_FDR     = sum(p.adjust(p, method = "BH") <= level),
+    Holm_FWER  = sum(p.adjust(p, method = "holm") <= level),
+    Bonf_FWER  = sum(p.adjust(p, method = "bonferroni") <= level)
+  )
+}
+
+summary_table <- rbind(
+  CAPM = summarize_rejections(res_capm, level = alpha),
+  FF3  = summarize_rejections(res_ff3,  level = alpha),
+  FF5  = summarize_rejections(res_ff5,  level = alpha)
+)
+
+print(summary_table)
+
+# Optional: inspect which stocks remain significant after BH or Holm (e.g., FF5)
+sig_ff5_bh   <- names(which(p.adjust(res_ff5$pvals, "BH") <= alpha))
+sig_ff5_holm <- names(which(p.adjust(res_ff5$pvals, "holm") <= alpha))
+cat("\nFF5 significant stocks (BH, 5%):", length(sig_ff5_bh), "\n")
+print(sig_ff5_bh)
+cat("\nFF5 significant stocks (Holm, 5%):", length(sig_ff5_holm), "\n")
+print(sig_ff5_holm)
+```
+```{r}
+sort(p.adjust(res_ff5$pvals, method = "BH"))[1:5]
+```
+
+```{r}
+# 1. Inspect the top 10 stocks by smallest raw p-value (FF5)
+top10_idx <- order(res_ff5$pvals)[1:10]
+top10 <- data.frame(
+  Annualized_Alpha_Pct = round(res_ff5$alphas[top10_idx] * 252 * 100, 2),
+  p_raw                = round(res_ff5$pvals[top10_idx], 5),
+  p_BH                 = round(p.adjust(res_ff5$pvals, "BH")[top10_idx], 4),
+  p_Holm               = round(p.adjust(res_ff5$pvals, "holm")[top10_idx], 4)
+)
+print(top10)
+
+# 2. Check BH rejections at more liberal FDR levels (10% and 20%)
+for (q in c(0.05, 0.10, 0.20)) {
+  cat(sprintf("FF5 BH rejections at q = %.2f: %d\n",
+              q, sum(p.adjust(res_ff5$pvals, "BH") <= q)))
+}
+
+# 3. One-sided test for POSITIVE alpha (H1: alpha > 0)
+p_onesided_capm <- ifelse(res_capm$alphas > 0, res_capm$pvals / 2, 1 - res_capm$pvals / 2)
+p_onesided_ff5  <- ifelse(res_ff5$alphas  > 0, res_ff5$pvals  / 2, 1 - res_ff5$pvals  / 2)
+
+cat("\nOne-sided (alpha > 0) BH rejections at 5% & 10%:\n")
+cat("CAPM (5% / 10%):", sum(p.adjust(p_onesided_capm, "BH") <= 0.05), "/",
+                         sum(p.adjust(p_onesided_capm, "BH") <= 0.10), "\n")
+cat("FF5  (5% / 10%):", sum(p.adjust(p_onesided_ff5,  "BH") <= 0.05), "/",
+                         sum(p.adjust(p_onesided_ff5,  "BH") <= 0.10), "\n")
+
+# 4. Histogram of raw p-values (compare against a flat Uniform(0,1) line)
+par(mfrow = c(1, 3))
+hist(res_capm$pvals, breaks = 20, freq = FALSE, main = "CAPM Raw p-values", xlab = "p-value")
+abline(h = 1, col = "red", lty = 2)
+hist(res_ff3$pvals,  breaks = 20, freq = FALSE, main = "FF3 Raw p-values",  xlab = "p-value")
+abline(h = 1, col = "red", lty = 2)
+hist(res_ff5$pvals,  breaks = 20, freq = FALSE, main = "FF5 Raw p-values",  xlab = "p-value")
+abline(h = 1, col = "red", lty = 2)
+```
+
